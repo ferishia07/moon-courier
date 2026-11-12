@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Pilot an astronaut across a lunar outpost, collect cargo, and return to your ship.">
+<title>Moon Courier</title>
+<style>
+:root{color-scheme:dark;--sky:#111222;--ink:#fff4e5;--muted:#c2b8d2;--orange:#ffb477;--line:#4a3b58}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 20% 10%,#30203e,transparent 58%),var(--sky);color:var(--ink);font-family:Inter,system-ui,sans-serif}
+main{max-width:1110px;margin:auto;padding:24px clamp(15px,4vw,42px)}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--line);padding-bottom:13px}
+.brand,.hud,.status{font:700 13px Consolas,monospace;letter-spacing:.04em}.brand span{color:var(--orange);margin-right:8px;font-size:19px}
+.intro{display:flex;align-items:end;justify-content:space-between;gap:18px;margin:24px 0 17px}h1{margin:0;font-size:clamp(48px,8vw,94px);letter-spacing:-.09em;line-height:.87}h1 span{color:var(--orange)}
+.intro p{max-width:35ch;margin:0;color:var(--muted);line-height:1.5}
+.deck{border:1px solid var(--line);border-radius:14px;background:#201a31;padding:clamp(9px,2vw,17px)}
+.hud{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:0 3px 11px;color:var(--orange)}
+.scene{position:relative}canvas{display:block;width:100%;aspect-ratio:3/2;background:#20192e;border-radius:7px;image-rendering:pixelated}
+.overlay{position:absolute;inset:0;display:grid;place-items:center;padding:15px;background:#141022b8;border-radius:7px;text-align:center}.overlay[hidden]{display:none}.card{background:#271f39;border:1px solid #6a536b;border-radius:12px;padding:clamp(12px,3vw,27px);max-width:330px}.card h2{margin:0;font-size:clamp(20px,4vw,34px);letter-spacing:-.04em}.card p{color:var(--muted);font-size:14px;line-height:1.45;margin:8px 0 13px}
+button{font:700 14px Inter,system-ui,sans-serif;border:1px solid var(--line);border-radius:6px;background:#332741;color:var(--ink);padding:8px 12px;cursor:pointer;touch-action:manipulation}
+button:hover{filter:brightness(1.2)}button:focus-visible,canvas:focus-visible{outline:2px solid var(--orange);outline-offset:3px}.primary{background:var(--orange);color:#271a22;border-color:var(--orange)}
+.bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 3px 0}.status{font-size:12px;color:var(--muted);margin:0}.pad{display:grid;grid-template-columns:repeat(3,40px);gap:3px;flex:none}.pad button{padding:3px;height:32px;font-size:17px;touch-action:none}.pad .up{grid-column:2}.pad .left{grid-column:1}
+@media(max-width:620px){.intro{display:block}.intro p{margin-top:11px}.hud{font-size:11px}}
+</style>
+<main>
+<header><div class="brand"><span aria-hidden="true">☾</span> MOON COURIER</div><button id="restart" type="button">Restart</button></header>
+<section class="intro"><h1>Moon Courier<span>.</span></h1><p>Recover the cargo, dodge the drones, and return to your ship.</p></section>
+<section class="deck" aria-label="Moon Courier game">
+<div class="hud"><span id="sector"></span><span id="cargo"></span><span id="suit"></span></div>
+<div class="scene">
+<canvas id="scene" width="720" height="480" tabindex="0" aria-label="Lunar outpost. Move with WASD or arrow keys."></canvas>
+<div class="overlay" id="overlay"><div class="card"><h2 id="title">Ready for pickup?</h2><p id="detail">Collect all the orange cargo crates and bring them back to the landing pad.</p><button class="primary" id="start" type="button">Start mission</button></div></div>
+</div>
+<div class="bottom"><p class="status" id="status" role="status">Move with WASD, arrow keys, or the direction buttons.</p>
+<div class="pad" aria-label="Direction buttons"><button class="up" data-key="up" aria-label="Move up">↑</button><button class="left" data-key="left" aria-label="Move left">←</button><button data-key="down" aria-label="Move down">↓</button><button data-key="right" aria-label="Move right">→</button></div></div>
+</section>
+</main>
+<script>
+"use strict";
+const byId = id => document.getElementById(id);
+const canvas = byId("scene");
+const ctx = canvas.getContext("2d");
+const width = canvas.width;
+const height = canvas.height;
+const overlay = byId("overlay");
+const start = byId("start");
+const keys = new Set();
+const pointerKeys = new Map();
+const keyMap = new Map(Object.entries({
+  ArrowUp:"up", w:"up", ArrowDown:"down", s:"down",
+  ArrowLeft:"left", a:"left", ArrowRight:"right", d:"right"
+}));
+const ship = { x: 73, y: 398 };
+const rocks = [
+  [155,68,105,61], [327,55,72,84], [540,77,96,52],
+  [81,194,100,55], [261,191,86,85], [451,178,108,63],
+  [173,332,73,82], [369,344,116,63], [573,304,71,92]
+];
+const dropSites = [
+  [78,77], [290,82], [483,77], [659,157], [210,165], [397,172],
+  [220,285], [382,290], [532,273], [675,436], [317,426], [515,428]
+];
+let sector = 1;
+let state = "ready";
+let player, cargo, drones, health, invulnerable, facing;
+let lastTime = 0;
+const distance = (a,b) => Math.hypot(a.x-b.x,a.y-b.y);
+const nearby = (a,b,radius) => distance(a,b) < radius;
+
+function setStatus(message) {
+  if (byId("status").textContent !== message) byId("status").textContent = message;
+}
+
+function hud() {
+  byId("sector").textContent = "SECTOR " + sector;
+  byId("cargo").textContent = "CARGO " + cargo.filter(crate => crate.taken).length + " / " + cargo.length;
+  byId("suit").textContent = "SUIT " + health + " / 3";
+}
+
+function setup() {
+  player = { ...ship };
+  health = 3;
+  invulnerable = 0;
+  facing = 1;
+  const remaining = [...dropSites];
+  cargo = Array.from({ length: Math.min(4 + sector, 8) }, () => {
+    const [[x,y]] = remaining.splice(Math.floor(Math.random()*remaining.length),1);
+    return { x, y, taken:false };
+  });
+  const speed = Math.min(1 + sector*.13, 2.1);
+  drones = [
+    { x:95, y:155, axis:"x", min:69, max:658, speed:74*speed },
+    { x:565, y:291, axis:"x", min:62, max:666, speed:-88*speed },
+    { x:511, y:85, axis:"y", min:45, max:160, speed:86*speed },
+    { x:346, y:421, axis:"x", min:278, max:661, speed:74*speed }
+  ];
+  if (sector > 1) drones.push({ x:670,y:209,axis:"y",min:150,max:415,speed:79*speed });
+  hud();
+}
+
+function showOverlay(nextState, title, detail, action) {
+  state = nextState;
+  keys.clear();
+  pointerKeys.clear();
+  byId("title").textContent = title;
+  byId("detail").textContent = detail;
+  start.textContent = action;
+  overlay.hidden = false;
+}
+
+function launch() {
+  if (state === "won") sector++;
+  if (state === "lost") sector = 1;
+  setup();
+  state = "playing";
+  overlay.hidden = true;
+  canvas.focus();
+  setStatus("Collect every crate, then return to the landing pad.");
+}
+
+function canMove(x,y) {
+  return x >= 13 && y >= 14 && x <= width-13 && y <= height-14
+    && !rocks.some(([left,top,w,h]) => x+10 > left && x-10 < left+w
+      && y+10 > top && y-10 < top+h);
+}
+
+function update(dt) {
+  const active = new Set([...keys,...pointerKeys.values()]);
+  const dx = Number(active.has("right")) - Number(active.has("left"));
+  const dy = Number(active.has("down")) - Number(active.has("up"));
+  const step = 184*dt / (Math.hypot(dx,dy) || 1);
+  if (dx) facing = dx;
+  if (canMove(player.x+dx*step,player.y)) player.x += dx*step;
+  if (canMove(player.x,player.y+dy*step)) player.y += dy*step;
+  invulnerable = Math.max(0,invulnerable-dt);
+
+  for (const drone of drones) {
+    const axis = drone.axis;
+    drone[axis] += drone.speed*dt;
+    if (drone[axis] <= drone.min || drone[axis] >= drone.max) {
+      drone[axis] = Math.max(drone.min,Math.min(drone.max,drone[axis]));
+      drone.speed *= -1;
+    }
+    if (invulnerable === 0 && nearby(player,drone,23)) {
+      health--;
+      hud();
+      if (!health) {
+        setStatus("Suit depleted.");
+        showOverlay("lost","Suit depleted","The drones got you. Start a new run and try another route.","Try again");
+        return;
+      }
+      invulnerable = 1.35;
+      setStatus("Drone hit. Keep moving!");
+    }
+  }
+  for (const crate of cargo) {
+    if (!crate.taken && nearby(player,crate,21)) {
+      crate.taken = true;
+      hud();
+      setStatus("Cargo recovered.");
+    }
+  }
+  if (cargo.every(crate => crate.taken)) {
+    setStatus("All cargo recovered. Return to the landing pad.");
+    if (nearby(player,ship,35)) {
+      setStatus("Sector cleared.");
+      showOverlay("won","Cargo delivered","Sector " + sector + " cleared. The next sector has a fresh cargo layout.","Next sector");
+    }
+  }
+}
+
+function rect(x,y,w,h,color) {
+  ctx.fillStyle = color;
+  ctx.fillRect(Math.round(x),Math.round(y),w,h);
+}
+
+function draw(time) {
+  rect(0,0,width,height,"#241b33");
+  for (let y=0;y<height;y+=40) for (let x=0;x<width;x+=40) {
+    if ((x+y)%80 === 0) rect(x,y,40,40,"#2a203a");
+  }
+  for (let i=0;i<110;i++) {
+    const x=(i*157+31)%width, y=(i*67+19)%height;
+    rect(x,y,2+i%3,2,i%5 ? "#3a2b48" : "#634567");
+  }
+  for (const [x,y,w,h] of rocks) {
+    rect(x+5,y+7,w,h,"#171325");
+    rect(x,y,w,h,"#4a3a57");
+    rect(x+3,y+3,w-6,7,"#725675");
+    rect(x+6,y+h-10,w-12,6,"#382b47");
+    for (let i=0;i<3;i++) rect(x+13+i*17,y+19+i*4,11,4,"#614a68");
+  }
+  const ready = cargo.every(crate => crate.taken);
+  rect(ship.x-32,ship.y-31,64,62,ready ? "#568768" : "#514361");
+  rect(ship.x-28,ship.y-27,56,54,"#2c293d");
+  rect(ship.x-23,ship.y+20,46,3,ready ? "#b9f5a9" : "#826b90");
+  rect(ship.x-11,ship.y-21,22,30,"#eee0dd");
+  rect(ship.x-7,ship.y-25,14,16,"#fff2e2");
+  rect(ship.x-6,ship.y-16,12,10,"#716ca0");
+  rect(ship.x-18,ship.y-2,7,17,"#f6a46b");
+  rect(ship.x+11,ship.y-2,7,17,"#f6a46b");
+  for (const {x,y,taken} of cargo) {
+    if (taken) continue;
+    rect(x-11,y-8,22,18,"#241924");
+    rect(x-9,y-9,18,16,"#e68b59");
+    rect(x-9,y-9,18,4,"#ffd497");
+    rect(x-2,y-7,4,14,"#a44d4c");
+  }
+  for (const {x,y} of drones) {
+    rect(x-16,y+7,32,5,"#1a1525");
+    rect(x-16,y-4,32,8,"#e774a0");
+    rect(x-10,y-9,20,17,"#95547f");
+    rect(x-6,y-5,12,7,"#ffb2ba");
+    rect(x-2,y-4,4,4,"#442344");
+  }
+  if (invulnerable && Math.floor(time/90)%2) return;
+  const {x,y} = player;
+  rect(x-11,y+10,22,5,"#191324");
+  const stride = (keys.size || pointerKeys.size) && state === "playing"
+    ? Math.floor(time/110)%2*3 : 0;
+  rect(x-7,y+5,5,7+stride,"#f6a46b");
+  rect(x+2,y+5,5,10-stride,"#f6a46b");
+  rect(x-11,y-5,22,13,"#efd7c7");
+  rect(x-8,y-14,16,17,"#fff5e1");
+  rect(x-5+facing*2,y-10,11,8,"#584b81");
+  rect(x+1+facing*2,y-9,4,2,"#b9bbeb");
+  rect(x-4,y+3,8,3,"#df8059");
+}
+
+function frame(time) {
+  const dt = Math.min((time-lastTime)/1000,.035);
+  lastTime = time;
+  if (state === "playing") update(dt);
+  draw(time);
+  requestAnimationFrame(frame);
+}
+
+function direction(event) {
+  return keyMap.get(event.key.length === 1 ? event.key.toLowerCase() : event.key);
+}
+window.addEventListener("keydown",event => {
+  const key = direction(event);
+  if (state !== "playing" || !key || event.ctrlKey || event.metaKey || event.altKey) return;
+  event.preventDefault();
+  keys.add(key);
+});
+window.addEventListener("keyup",event => keys.delete(direction(event)));
+window.addEventListener("blur",() => { keys.clear(); pointerKeys.clear(); });
+document.querySelectorAll("[data-key]").forEach(button => {
+  button.addEventListener("pointerdown",event => {
+    if (state !== "playing" || event.button !== 0) return;
+    button.setPointerCapture(event.pointerId);
+    pointerKeys.set(event.pointerId,button.dataset.key);
+  });
+  for (const type of ["pointerup","pointercancel","lostpointercapture"]) {
+    button.addEventListener(type,event => pointerKeys.delete(event.pointerId));
+  }
+});
+start.addEventListener("click",launch);
+byId("restart").addEventListener("click",() => {
+  sector = 1;
+  showOverlay("ready","Ready for pickup?","Collect the orange crates and return to your ship.","Start mission");
+  setup();
+  setStatus("Move with WASD, arrow keys, or the direction buttons.");
+});
+setup();
+requestAnimationFrame(frame);
+</script>
+</html>
